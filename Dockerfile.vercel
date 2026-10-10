@@ -1,0 +1,3 @@
+FROM gotenberg/gotenberg:8.37.0
+COPY --chown=gotenberg:gotenberg server.py index.html /app/
+ENTRYPOINT ["python3", "/app/server.py"]
