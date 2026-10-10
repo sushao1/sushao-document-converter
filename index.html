@@ -6,39 +6,39 @@
 <style>
 *{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#18243b;font:16px system-ui,sans-serif}main{max-width:640px;margin:10vh auto;padding:32px;background:white;border-radius:24px;box-shadow:0 12px 50px #172b4d10}h1{margin:16px 0;font-size:32px}p{color:#647086;line-height:1.8}a{color:#335bd4}label{display:block;margin:28px 0 12px;font-weight:600}input{width:100%;padding:20px;border:2px dashed #cbd5e7;border-radius:12px}button{width:100%;margin-top:20px;padding:15px;border:0;border-radius:12px;background:#335bd4;color:white;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:wait}#status{min-height:48px;white-space:pre-wrap}small{color:#647086}@media(max-width:680px){main{margin:24px 16px;padding:24px}}
 </style>
-<style>select{width:100%;padding:12px;border:1px solid #cbd5e7;border-radius:12px;font:inherit;background:white}</style>
+<style>select{width:100%;padding:12px;border:1px solid #cbd5e7;border-radius:12px;font:inherit;background:white}[hidden]{display:none}</style>
 <main>
 <a href="https://sushao-nav.vercel.app/">← 返回工具导航</a>
 <h1>文档格式转换</h1>
-<form id="form"><label for="mode">转换类型</label><select id="mode"><option value="pdf-to-word">PDF 转 Word</option><option value="office-to-pdf">Word / Excel / PPT 转 PDF</option></select><p id="hint">支持可选中文字的 PDF，单文件限 4MB、最多 30 页。扫描图片版需先做 OCR。</p><label for="file">选择 PDF 文件</label><input id="file" type="file" accept=".pdf" required><button id="convert">转换并下载 Word</button></form>
+<form id="form"><label for="mode">转换类型</label><select id="mode"><option value="pdf-to-word">PDF 转 Word</option><option value="pdf-to-images">PDF 转图片</option><option value="office-to-pdf">Word / Excel / PPT 转 PDF</option></select><p id="hint">支持可选中文字的 PDF，单文件限 4MB、最多 30 页。扫描图片版需先做 OCR。</p><div id="format-row" hidden><label for="format">图片格式</label><select id="format"><option value="png">PNG（画质优先）</option><option value="jpg">JPG（体积较小）</option></select></div><label for="file">选择 PDF 文件</label><input id="file" type="file" accept=".pdf" required><button id="convert">转换并下载 Word</button></form>
 <p id="status" role="status" aria-live="polite"></p>
 <small>首次启动可能稍慢。复杂排版与特殊字体请检查转换结果。</small>
 <p><small><a href="https://github.com/sushao1/sushao-document-converter">查看开源代码</a></small></p>
 </main>
 <script>
-const form=document.querySelector('#form'),file=document.querySelector('#file'),button=document.querySelector('#convert'),status=document.querySelector('#status'),mode=document.querySelector('#mode');
+const form=document.querySelector('#form'),file=document.querySelector('#file'),button=document.querySelector('#convert'),status=document.querySelector('#status'),mode=document.querySelector('#mode'),format=document.querySelector('#format'),formatRow=document.querySelector('#format-row');
 mode.addEventListener('change',()=>{
- const pdf=mode.value==='pdf-to-word';file.value='';file.accept=pdf?'.pdf':'.docx,.xlsx,.pptx';
+ const pdf=mode.value!=='office-to-pdf',images=mode.value==='pdf-to-images';file.value='';file.accept=pdf?'.pdf':'.docx,.xlsx,.pptx';formatRow.hidden=!images;
  document.querySelector('label[for="file"]').textContent=pdf?'选择 PDF 文件':'选择 Office 文件';
- document.querySelector('#hint').textContent=pdf?'支持可选中文字的 PDF，单文件限 4MB、最多 30 页。扫描图片版需先做 OCR。':'支持 DOCX、XLSX、PPTX，单文件限 4MB。';
- button.textContent=pdf?'转换并下载 Word':'转换并下载 PDF';status.textContent='';
+ document.querySelector('#hint').textContent=images?'支持 PNG、JPG，单文件限 4MB、最多 30 页；多页图片会打包为 ZIP。':pdf?'支持可选中文字的 PDF，单文件限 4MB、最多 30 页。扫描图片版需先做 OCR。':'支持 DOCX、XLSX、PPTX，单文件限 4MB。';
+ button.textContent=images?'转换并下载图片':pdf?'转换并下载 Word':'转换并下载 PDF';status.textContent='';
 });
 form.addEventListener('submit',async event=>{
- event.preventDefault(); const input=file.files[0],pdf=mode.value==='pdf-to-word';
+ event.preventDefault(); const input=file.files[0],pdf=mode.value!=='office-to-pdf',images=mode.value==='pdf-to-images';
  if(!input || !(pdf?/\.pdf$/i:/\.(docx|xlsx|pptx)$/i).test(input.name)){status.textContent='请选择当前转换类型支持的文件。';return;}
  if(input.size>4*1024*1024-4096){status.textContent='文件超过 4MB，请选择较小的文件。';return;}
- button.disabled=true;mode.disabled=true;file.disabled=true;status.textContent='正在转换，请稍候…';
+ button.disabled=true;mode.disabled=true;format.disabled=true;file.disabled=true;status.textContent='正在转换，请稍候…';
  try{
-  const data=new FormData();data.append('files',input);
-  const response=await fetch(pdf?'/api/pdf-to-word':'/api/convert',{method:'POST',body:data});
+  const data=new FormData();data.append('files',input);if(images)data.append('format',format.value);
+  const response=await fetch(images?'/api/pdf-to-images':pdf?'/api/pdf-to-word':'/api/convert',{method:'POST',body:data});
   if(!response.ok){throw new Error(response.status===413?'文件或转换结果过大。':await response.text());}
-  const expected=pdf?'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'application/pdf';
+  const expected=images?'application/zip':pdf?'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'application/pdf';
   if(!response.headers.get('Content-Type')?.includes(expected))throw new Error('服务未返回预期文件，请稍后重试。');
   const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
-  link.href=url;link.download=input.name.replace(/\.[^.]+$/,pdf?'.docx':'.pdf');document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
-  status.textContent='转换完成，'+(pdf?'Word':'PDF')+' 已开始下载。';
+  link.href=url;link.download=input.name.replace(/\.[^.]+$/,images?'-images.zip':pdf?'.docx':'.pdf');document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  status.textContent='转换完成，'+(images?'图片压缩包':pdf?'Word':'PDF')+' 已开始下载。';
  }catch(error){status.textContent=error.message || '转换失败，请稍后重试。';}
- finally{button.disabled=false;mode.disabled=false;file.disabled=false;}
+ finally{button.disabled=false;mode.disabled=false;format.disabled=false;file.disabled=false;}
 });
 </script>
 </html>
