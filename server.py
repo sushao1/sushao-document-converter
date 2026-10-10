@@ -3,6 +3,8 @@ import io
 import os
 from pathlib import Path
 import subprocess
+import socket
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from email.parser import BytesParser
 from email.policy import default
@@ -93,4 +95,12 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     subprocess.Popen(['gotenberg', '--api-port=3001', '--api-bind-ip=127.0.0.1',
                       '--chromium-disable-routes', '--webhook-disable', '--api-disable-download-from'])
+    for attempt in range(300):
+        try:
+            socket.create_connection(('127.0.0.1', 3001), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        raise RuntimeError('Gotenberg failed to start')
     ThreadingHTTPServer(('0.0.0.0', int(os.environ.get('PORT', '80'))), Handler).serve_forever()
