@@ -14,25 +14,33 @@ from email.policy import default
 import zipfile
 
 LIMIT = 4 * 1024 * 1024
+IMAGE_OUTPUT_LIMIT = 20 * 1024 * 1024
 OFFICE = {'.docx': 'word/document.xml', '.xlsx': 'xl/workbook.xml', '.pptx': 'ppt/presentation.xml'}
 DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 PDF_WORKER = threading.BoundedSemaphore(1)
 
 
-def validate(body, content_type, pdf=False):
+def validate(body, content_type, pdf=False, image_format=False):
     if not content_type.startswith('multipart/form-data;'):
         raise ValueError('请选择 Office 文件。')
     message = BytesParser(policy=default).parsebytes(
         b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)
     parts = list(message.iter_parts())
-    if len(parts) != 1 or parts[0].get_param('name', header='content-disposition') != 'files':
+    files = [part for part in parts if part.get_param('name', header='content-disposition') == 'files']
+    formats = [part for part in parts if part.get_param('name', header='content-disposition') == 'format']
+    if len(files) != 1 or len(parts) != 1 + bool(image_format) or len(formats) != bool(image_format):
         raise ValueError('每次请选择一个文件。')
-    filename = parts[0].get_filename() or ''
+    filename = files[0].get_filename() or ''
     extension = Path(filename).suffix.lower()
-    payload = parts[0].get_payload(decode=True)
+    payload = files[0].get_payload(decode=True)
     if pdf:
         if extension != '.pdf' or not payload or not payload.startswith(b'%PDF-'):
             raise ValueError('请选择有效的 PDF 文件。')
+        if image_format:
+            value = formats[0].get_payload(decode=True).decode('ascii').lower()
+            if value not in ('png', 'jpg'):
+                raise ValueError('图片格式仅支持 PNG 或 JPG。')
+            return payload, value
         return payload
     if extension not in OFFICE:
         raise ValueError('仅支持 DOCX、XLSX、PPTX。')
@@ -66,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, b'Not found')
 
     def do_POST(self):
-        if self.path not in ('/api/convert', '/api/pdf-to-word'):
+        if self.path not in ('/api/convert', '/api/pdf-to-word', '/api/pdf-to-images'):
             self.reply(404, b'Not found')
             return
         try:
@@ -78,12 +86,15 @@ class Handler(BaseHTTPRequestHandler):
             if len(body) != length:
                 raise ValueError('上传中断，请重新上传。')
             content_type = self.headers.get('Content-Type', '')
-            payload = validate(body, content_type, pdf=self.path == '/api/pdf-to-word')
+            images = self.path == '/api/pdf-to-images'
+            payload = validate(body, content_type, pdf=self.path != '/api/convert', image_format=images)
         except (ValueError, UnicodeError) as error:
             self.reply(400, str(error).encode())
             return
         if self.path == '/api/pdf-to-word':
             self.pdf_to_word(payload)
+        elif self.path == '/api/pdf-to-images':
+            self.pdf_to_images(*payload)
         else:
             self.forward('POST', '/forms/libreoffice/convert', body, content_type)
 
@@ -104,6 +115,30 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(413, '转换结果超过 4MB，请缩小文件。'.encode())
                 else:
                     self.reply(200, output.read_bytes(), DOCX_TYPE)
+        except subprocess.TimeoutExpired:
+            self.reply(504, '转换超时，请减少 PDF 页数后重试。'.encode())
+        except OSError:
+            self.reply(503, '转换服务暂不可用，请稍后重试。'.encode())
+        finally:
+            PDF_WORKER.release()
+
+    def pdf_to_images(self, payload, image_format):
+        if not PDF_WORKER.acquire(blocking=False):
+            self.reply(429, '已有 PDF 正在转换，请稍后重试。'.encode())
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix='pdf-to-images-') as folder:
+                source, output = Path(folder) / 'input.pdf', Path(folder) / 'images.zip'
+                source.write_bytes(payload)
+                process = subprocess.run([sys.executable, __file__, '--pdf-to-images', str(source), str(output), image_format],
+                                         capture_output=True, timeout=120)
+                if process.returncode:
+                    message = process.stdout.strip() if process.returncode == 2 else 'PDF 转图片失败，请检查文件是否损坏。'.encode()
+                    self.reply(400, message)
+                elif output.stat().st_size > IMAGE_OUTPUT_LIMIT:
+                    self.reply(413, '图片压缩包超过 20MB，请减少 PDF 页数。'.encode())
+                else:
+                    self.reply(200, output.read_bytes(), 'application/zip')
         except subprocess.TimeoutExpired:
             self.reply(504, '转换超时，请减少 PDF 页数后重试。'.encode())
         except OSError:
@@ -152,9 +187,29 @@ def convert_pdf(source, output):
         converter.close()
 
 
-if __name__ == '__main__' and sys.argv[1:2] == ['--pdf-to-word']:
+def render_pdf_images(source, output, image_format):
+    import pymupdf
+    if image_format not in ('png', 'jpg'):
+        raise ValueError('图片格式仅支持 PNG 或 JPG。')
+    with pymupdf.open(source) as document, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+        if document.needs_pass:
+            raise ValueError('PDF 受密码保护，请先解除密码。')
+        if not 0 < len(document) <= 30:
+            raise ValueError('PDF 最多支持 30 页，请拆分后重试。')
+        for number, page in enumerate(document, 1):
+            if page.rect.width * page.rect.height * 4 > 40_000_000:
+                raise ValueError('PDF 页面尺寸过大，请缩小后重试。')
+            image = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+            data = image.tobytes('png' if image_format == 'png' else 'jpeg', jpg_quality=90)
+            archive.writestr(f'page-{number:03d}.{image_format}', data)
+
+
+if __name__ == '__main__' and sys.argv[1:2] in (['--pdf-to-word'], ['--pdf-to-images']):
     try:
-        convert_pdf(sys.argv[2], sys.argv[3])
+        if sys.argv[1] == '--pdf-to-word':
+            convert_pdf(sys.argv[2], sys.argv[3])
+        else:
+            render_pdf_images(sys.argv[2], sys.argv[3], sys.argv[4])
     except ValueError as error:
         print(str(error))
         sys.exit(2)
