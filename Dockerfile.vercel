@@ -1,3 +1,9 @@
 FROM gotenberg/gotenberg:8.37.0
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && python3 -m venv /opt/pdf-converter \
+    && /opt/pdf-converter/bin/pip install --no-cache-dir --only-binary=:all: pdf2docx==0.5.13 PyMuPDF==1.28.2 \
+    && rm -rf /var/lib/apt/lists/*
+USER gotenberg
 COPY --chown=gotenberg:gotenberg server.py index.html /app/
-ENTRYPOINT ["python3", "/app/server.py"]
+ENTRYPOINT ["/opt/pdf-converter/bin/python", "/app/server.py"]
