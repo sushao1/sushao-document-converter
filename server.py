@@ -131,7 +131,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def convert_pdf(source, output):
     import pymupdf
-    from pdf2docx import Converter
     with pymupdf.open(source) as document:
         if document.needs_pass:
             raise ValueError('PDF 受密码保护，请先解除密码。')
@@ -145,6 +144,7 @@ def convert_pdf(source, output):
             has_text = has_text or bool(text)
         if not has_text:
             raise ValueError('PDF 没有可转换的文字。')
+    from pdf2docx import Converter
     converter = Converter(source)
     try:
         converter.convert(output, ignore_page_error=False)
